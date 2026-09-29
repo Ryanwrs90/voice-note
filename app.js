@@ -415,11 +415,33 @@ function pickMime() {
   return ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'].find(t => MediaRecorder.isTypeSupported(t)) || '';
 }
 
+// iOS home-screen apps don't remember mic permission, so every getUserMedia can re-prompt.
+// Keep one mic stream alive between recordings and only release it when the app goes to
+// the background, after 5 idle minutes, or before playback (an open mic can route audio
+// to the quiet earpiece). The orange mic dot stays on while it's held.
+const MIC_IDLE_MS = 5 * 60 * 1000;
+let micStream = null, micIdleTimer = null;
+
+async function getMic() {
+  clearTimeout(micIdleTimer);
+  if (micStream?.getAudioTracks().some(t => t.readyState === 'live')) return micStream;
+  setAudioSession('play-and-record');
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  return micStream;
+}
+
+function releaseMic() {
+  clearTimeout(micIdleTimer);
+  if (rec || !micStream) return;
+  micStream.getTracks().forEach(t => t.stop());
+  micStream = null;
+  setAudioSession('playback');
+}
+
 async function startRec() {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return toast('这个浏览器不支持录音');
-  setAudioSession('play-and-record');
   try {
-    recStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    recStream = await getMic();
   } catch (err) {
     return toast(err.name === 'NotAllowedError' ? '没有麦克风权限，请在设置里允许' : '无法开始录音');
   }
@@ -441,8 +463,7 @@ async function stopRec(keep) {
   clearInterval(recTimer);
   const duration = (Date.now() - recStart) / 1000;
   await new Promise(r => { rec.onstop = r; rec.stop(); });
-  recStream.getTracks().forEach(t => t.stop());
-  setAudioSession('playback');
+  micIdleTimer = setTimeout(releaseMic, MIC_IDLE_MS);
   const type = rec.mimeType || pickMime() || 'audio/mp4';
   const chunks = recChunks;
   rec = null; recStream = null; recChunks = [];
@@ -822,6 +843,7 @@ async function openDetail(id) {
   audioEl.onended = () => { playBtn.innerHTML = ICON.play; seek.value = 0; seek.style.setProperty('--p', '0%'); time.textContent = fmtDur(it.duration); };
   playBtn.onclick = () => {
     if (!audioEl.paused) return audioEl.pause();
+    releaseMic();
     setAudioSession('playback');
     audioEl.play().catch(() => toast('无法播放'));
   };
@@ -1116,7 +1138,12 @@ async function init() {
   window.visualViewport?.addEventListener('scroll', fitOverlay);
   // iOS only shows :active pressed states when the page has a touch listener.
   document.addEventListener('touchstart', () => {}, { passive: true });
-  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && checkUpdate());
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible') return checkUpdate();
+    // Leaving the app: keep what was recorded so far, then let go of the mic.
+    if (rec) await stopRec(true);
+    releaseMic();
+  });
   checkUpdate();
   $('#done-toggle').onclick = () => { showDone = !showDone; render(); };
   $('#sheet-overlay').onclick = e => { if (e.target.id === 'sheet-overlay') closeSheet(); };
