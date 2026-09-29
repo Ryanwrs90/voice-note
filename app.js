@@ -109,20 +109,35 @@ function toast(msg, action) {
 // ---------- categories ----------
 // No red on purpose: red already means "record" and "delete" in this app.
 const PALETTE = ['#F08A24', '#EFC127', '#46B04A', '#1D9E9A', '#378ADD', '#5E5CE6', '#9B59D0', '#E4589A'];
+// `hint` is shown to the AI next to the name, so ambiguous names (交易 = trading, not shopping) sort right.
 const DEFAULT_CATS = [
-  { id: 'idea', name: 'Idea', color: '#EFC127' },
-  { id: 'todo', name: '待办', color: '#378ADD' },
-  { id: 'life', name: '生活', color: '#46B04A' },
+  { id: 'idea', name: 'Idea', color: '#EFC127', hint: '想法、点子、灵感、以后可能做的项目或产品构想' },
+  { id: 'todo', name: '待办', color: '#378ADD', hint: '需要去做的具体事情、要回复的人、有期限的任务' },
+  { id: 'life', name: '生活', color: '#46B04A', hint: '日常生活、购物、家务、健康、家人朋友' },
+  { id: 'trade', name: '交易', color: '#5E5CE6', hint: '黄金 XAUUSD 等金融交易、下单、止损止盈、复盘、行情观察、交易心得；不是日常购物' },
 ];
 function loadCats() {
-  try { const c = JSON.parse(localStorage.getItem('categories')); if (Array.isArray(c)) return c; } catch {}
-  return DEFAULT_CATS.map(c => ({ ...c }));
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem('categories')); } catch {}
+  if (!Array.isArray(c)) return DEFAULT_CATS.map(c => ({ ...c }));
+  // One-time upgrade for lists saved before hints existed: add 交易 and fill in default hints.
+  let upgraded = false;
+  try { upgraded = localStorage.getItem('catsUpgrade') === '2'; } catch {}
+  if (!upgraded) {
+    for (const d of DEFAULT_CATS) {
+      const mine = c.find(x => x.id === d.id || x.name === d.name);
+      if (!mine) { if (d.id === 'trade') c.push({ ...d }); }
+      else if (!mine.hint && mine.name === d.name) mine.hint = d.hint;
+    }
+    try { localStorage.setItem('categories', JSON.stringify(c)); localStorage.setItem('catsUpgrade', '2'); } catch {}
+  }
+  return c;
 }
 function saveCats() { try { localStorage.setItem('categories', JSON.stringify(cats)); } catch {} }
 let cats = loadCats();
 let currentCat = (() => { try { return localStorage.getItem('currentCat') || 'all'; } catch { return 'all'; } })();
 const catOf = it => cats.find(c => c.id === it.cat) || null;
-const catListText = () => cats.map(c => c.name).join('、');
+const catListText = () => cats.map(c => `- ${c.name}${c.hint ? '：' + c.hint : ''}`).join('\n');
 
 // Apply the AI's pick, unless you've chosen this item's category yourself.
 function applyAICat(it, name) {
@@ -303,7 +318,7 @@ function enableSwipe(list, onDelete) {
   list.addEventListener('pointerdown', e => {
     const row = e.target.closest('.row');
     if (!row || !row.parentElement.dataset.id || e.button > 0) return;
-    if (e.target.closest('.grip, input, .swatches')) return;
+    if (e.target.closest('.grip, input, textarea, .swatches')) return;
     const base = row === openRow ? OPEN_X : 0;
     s = { row, x0: e.clientX, y0: e.clientY, base, x: base, mode: null, pid: e.pointerId, lastX: e.clientX, lastT: e.timeStamp, v: 0 };
   });
@@ -523,7 +538,7 @@ async function tidy(it) {
   it.cleanStatus = 'pending'; it.cleanError = '';
   await save(it); render(); refreshDetail(it.id);
   try {
-    const out = await chatJSON(`${TIDY_PROMPT}\n分类：${catListText()}`, it.transcript);
+    const out = await chatJSON(`${TIDY_PROMPT}\n分类（名称：说明）：\n${catListText()}`, it.transcript);
     if (typeof out.text !== 'string' || !out.text.trim()) throw new Error('结果格式不对');
     it.clean = out.text.trim();
     it.autoTitle = typeof out.title === 'string' ? out.title.trim().slice(0, 30) : '';
@@ -541,7 +556,7 @@ async function tidy(it) {
 async function classify(it) {
   if (!settings.get().key || !cats.length) return;
   try {
-    const out = await chatJSON(`${CLASSIFY_PROMPT}\n分类：${catListText()}`, titleOf(it));
+    const out = await chatJSON(`${CLASSIFY_PROMPT}\n分类（名称：说明）：\n${catListText()}`, titleOf(it));
     applyAICat(it, out.category);
   } catch { return; }
   if (!items.includes(it)) return;
@@ -913,6 +928,8 @@ function catRowHTML(c) {
       <span class="dot big" style="background:${c.color}"></span>
       ${open ? `<input class="cat-name" value="${esc(c.name)}" maxlength="12" enterkeyhint="done">` : `<span class="cat-label">${esc(c.name)}</span>`}
       <span class="grip" aria-label="拖动排序">${ICON.grip}</span>
+      ${open ? `<label class="cat-hint-wrap"><span>给 AI 的说明（选填）</span>
+        <textarea class="cat-hint" rows="1" placeholder="这个分类放什么，例如：黄金、下单、复盘" enterkeyhint="done">${esc(c.hint || '')}</textarea></label>` : ''}
       ${open ? `<div class="swatches">${PALETTE.map(col =>
         `<button class="swatch${col === c.color ? ' on' : ''}" data-color="${col}" style="background:${col}" aria-label="颜色"></button>`).join('')}</div>` : ''}
     </div>
@@ -921,7 +938,9 @@ function catRowHTML(c) {
 
 function renderCatList() {
   const ul = $('#s-cats');
-  if (ul) ul.innerHTML = cats.map(catRowHTML).join('');
+  if (!ul) return;
+  ul.innerHTML = cats.map(catRowHTML).join('');
+  ul.querySelectorAll('.cat-hint').forEach(autoGrow);
 }
 
 function catsChanged() { saveCats(); render(); }
@@ -962,16 +981,19 @@ function setupCatEditor() {
       catsChanged();
       return;
     }
-    if (e.target.closest('input, .grip, .swatches')) return;
+    if (e.target.closest('input, textarea, label, .grip, .swatches')) return;
     openCatId = openCatId === c.id ? null : c.id;
     renderCatList();
   });
   ul.addEventListener('input', e => {
-    if (!e.target.matches('.cat-name')) return;
-    const c = cats.find(x => x.id === e.target.closest('[data-id]').dataset.id);
-    if (e.target.value.trim()) { c.name = e.target.value.trim(); catsChanged(); }
+    const c = cats.find(x => x.id === e.target.closest('[data-id]')?.dataset.id);
+    if (!c) return;
+    if (e.target.matches('.cat-name') && e.target.value.trim()) { c.name = e.target.value.trim(); catsChanged(); }
+    if (e.target.matches('.cat-hint')) { autoGrow(e.target); c.hint = e.target.value.replace(/\s*\n\s*/g, ' ').trim(); saveCats(); }
   });
-  ul.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('.cat-name')) e.target.blur(); });
+  ul.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.matches('.cat-name, .cat-hint')) { e.preventDefault(); e.target.blur(); }
+  });
   ul.addEventListener('focusout', e => {
     if (!e.target.matches('.cat-name')) return;
     const c = cats.find(x => x.id === e.target.closest('[data-id]').dataset.id);

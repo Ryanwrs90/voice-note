@@ -233,6 +233,8 @@ main { padding: 0 16px; }
 .cat-name { flex: 1; min-width: 0; border: 0; outline: none; background: var(--field); border-radius: 8px; padding: 5px 8px; font-size: 16px; }
 .grip { width: 28px; height: 28px; display: grid; place-items: center; color: var(--text-3); touch-action: none; cursor: grab; margin: -6px -6px -6px 0; }
 .grip svg { width: 16px; height: 16px; }
+.cat-hint-wrap { flex-basis: 100%; padding-left: 24px; display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-2); }
+.cat-hint { border: 0; outline: none; background: var(--field); border-radius: 8px; padding: 6px 8px; font-size: 16px; line-height: 1.4; color: var(--text); resize: none; overflow: hidden; }
 .swatches { flex-basis: 100%; display: flex; gap: 10px; padding-left: 24px; }
 .swatch { width: 26px; height: 26px; border-radius: 50%; }
 .swatch.on { box-shadow: 0 0 0 2px var(--field-solid), 0 0 0 4px var(--text); }
