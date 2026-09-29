@@ -41,7 +41,6 @@ body {
   color: var(--text);
   font: 15px/1.4 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
   min-height: 100dvh;
-  padding-top: env(safe-area-inset-top, 0px);
   padding-bottom: calc(96px + var(--safe-b));
   -webkit-font-smoothing: antialiased;
 }
@@ -50,6 +49,10 @@ input, textarea, select { font: inherit; color: inherit; }
 svg { display: block; }
 
 /* header */
+.head {
+  position: sticky; top: 0; z-index: 4; background: var(--bg);
+  padding-top: env(safe-area-inset-top, 0px);
+}
 .top { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 6px; }
 .top h1 { font-size: 28px; font-weight: 700; margin: 0; letter-spacing: 0.2px; }
 .icon-btn { width: 40px; height: 40px; display: grid; place-items: center; color: var(--text-2); border-radius: 50%; }
@@ -127,14 +130,19 @@ main { padding: 0 16px; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 
 /* sheet */
-.overlay { position: fixed; inset: 0; touch-action: none; background: var(--overlay); display: flex; align-items: flex-end; justify-content: center; z-index: 10; animation: fade 0.2s; }
+.overlay { position: fixed; inset: 0; touch-action: none; display: flex; align-items: flex-end; justify-content: center; z-index: 10; animation: fade 0.2s; }
+.overlay::before {
+  content: ""; position: absolute; inset: 0; background: var(--overlay);
+  opacity: var(--dim, 1); transition: opacity 0.24s ease;
+}
+.overlay.dragging::before { transition: none; }
 @keyframes fade { from { opacity: 0; } }
 .sheet {
   width: 100%; max-width: 560px; max-height: min(88dvh, calc(100% - 12px)); overflow-y: auto;
   overscroll-behavior: contain; touch-action: pan-y;
   background: var(--card); border-radius: 14px 14px 0 0;
   padding: 6px 16px calc(20px + var(--safe-b));
-  animation: up 0.25s ease; transition: transform 0.2s ease;
+  position: relative; animation: up 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @keyframes up { from { transform: translateY(100%); } }
 .grab { padding: 4px 0 8px; display: grid; place-items: center; touch-action: none; }

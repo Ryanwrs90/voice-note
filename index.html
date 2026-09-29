@@ -16,14 +16,16 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="top">
-  <h1>想法</h1>
-  <button class="icon-btn" id="btn-settings" aria-label="设置"></button>
-</header>
-
-<div class="search" id="search" hidden>
-  <input id="search-input" type="search" placeholder="搜索文字和转写" autocomplete="off">
-  <button class="text-btn" id="search-close">取消</button>
+<!-- Sticky and opaque on purpose: iOS 26 skips its top-edge blur when a solid bar covers the top. -->
+<div class="head" id="head">
+  <header class="top">
+    <h1>想法</h1>
+    <button class="icon-btn" id="btn-settings" aria-label="设置"></button>
+  </header>
+  <div class="search" id="search" hidden>
+    <input id="search-input" type="search" placeholder="搜索文字和转写" autocomplete="off">
+    <button class="text-btn" id="search-close">取消</button>
+  </div>
 </div>
 
 <main>

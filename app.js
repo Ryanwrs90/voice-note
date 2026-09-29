@@ -351,24 +351,47 @@ async function transcribe(it) {
 // ---------- sheet (detail + settings) ----------
 let audioEl = null, audioUrl = null;
 
+let closeTimer = null;
+
 function openSheet(html) {
-  const sheet = $('#sheet');
+  if (closeTimer) finishClose();
+  const sheet = $('#sheet'), o = $('#sheet-overlay');
   sheet.innerHTML = '<div class="grab"></div>' + html;
+  sheet.style.transition = '';
   sheet.style.transform = '';
   sheet.scrollTop = 0;
-  if ($('#sheet-overlay').hidden) lockScroll();
-  $('#sheet-overlay').hidden = false;
+  if (o.hidden) lockScroll();
+  setDim(1);
+  o.hidden = false;
   fitOverlay();
 }
 
+// Slide the sheet down and fade the backdrop, then tear down.
 function closeSheet() {
+  const o = $('#sheet-overlay'), sheet = $('#sheet');
+  if (o.hidden || closeTimer) return;
   if (document.activeElement) document.activeElement.blur();
+  if (audioEl) audioEl.pause();
+  openId = null;
+  sheet.style.transition = 'transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1)';
+  sheet.style.transform = 'translateY(100%)';
+  o.classList.remove('dragging');
+  setDim(0);
+  closeTimer = setTimeout(finishClose, 240);
+}
+
+function finishClose() {
+  clearTimeout(closeTimer);
+  closeTimer = null;
   $('#sheet-overlay').hidden = true;
   $('#sheet').innerHTML = '';
-  openId = null;
   unlockScroll();
   if (audioEl) { audioEl.pause(); audioEl = null; }
   if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
+}
+
+function setDim(k) {
+  $('#sheet-overlay').style.setProperty('--dim', Math.max(0, Math.min(1, k)));
 }
 
 // While a sheet is open, pin the page underneath so swipes inside the sheet
@@ -378,11 +401,14 @@ function lockScroll() {
   lockedY = window.scrollY;
   document.documentElement.classList.add('locked');
   document.body.style.top = `-${lockedY}px`;
+  // The sticky header would ride up with the pinned body; hold it at the top.
+  $('#head').style.transform = `translateY(${lockedY}px)`;
 }
 function unlockScroll() {
   if (!document.documentElement.classList.contains('locked')) return;
   document.documentElement.classList.remove('locked');
   document.body.style.top = '';
+  $('#head').style.transform = '';
   window.scrollTo(0, lockedY);
 }
 
@@ -394,36 +420,50 @@ function fitOverlay() {
   o.style.height = vv.height + 'px';
 }
 
-// Drag the sheet down to close: from the handle, or from anywhere once its content is scrolled to the top.
+// Drag the sheet down to close, like a native iOS sheet: works from anywhere (text boxes
+// included, unless you're typing in one) once the content is scrolled to the top.
+// A quick flick closes it too.
 function enableSwipeClose(sheet) {
-  let y0 = null, dy = 0, dragging = false, fromTop = false;
+  const o = $('#sheet-overlay');
+  let t = null;
   sheet.addEventListener('touchstart', e => {
-    y0 = null;
-    if (e.touches.length > 1) return;
-    const onGrab = !!e.target.closest('.grab');
-    if (!onGrab && e.target.closest('input, textarea, select')) return;
-    y0 = e.touches[0].clientY; dy = 0; dragging = false;
-    fromTop = onGrab || sheet.scrollTop <= 0;
+    t = null;
+    if (e.touches.length > 1 || closeTimer) return;
+    const f = e.target.closest('input, textarea, select');
+    if (f && (f.type === 'range' || f === document.activeElement)) return;
+    const y = e.touches[0].clientY;
+    t = { y0: y, lastY: y, lastT: e.timeStamp, v: 0, dy: 0, dragging: false };
   }, { passive: true });
   sheet.addEventListener('touchmove', e => {
-    if (y0 === null) return;
-    const d = e.touches[0].clientY - y0;
-    if (!dragging) {
-      if (fromTop && d > 6) { dragging = true; sheet.style.transition = 'none'; }
-      else if (Math.abs(d) > 6) { y0 = null; return; }
-      else return;
+    if (!t) return;
+    const y = e.touches[0].clientY;
+    const dt = Math.max(1, e.timeStamp - t.lastT);
+    const movingDown = y > t.lastY;
+    t.v = 0.7 * ((y - t.lastY) / dt) + 0.3 * t.v;
+    t.lastY = y; t.lastT = e.timeStamp;
+    if (!t.dragging) {
+      if (!(movingDown && sheet.scrollTop <= 0 && e.cancelable)) return;
+      t.dragging = true;
+      t.y0 = y;
+      sheet.style.transition = 'none';
+      o.classList.add('dragging');
     }
     e.preventDefault();
-    dy = Math.max(0, d);
-    sheet.style.transform = `translateY(${dy}px)`;
+    t.dy = Math.max(0, y - t.y0);
+    sheet.style.transform = `translateY(${t.dy}px)`;
+    setDim(1 - t.dy / sheet.offsetHeight);
   }, { passive: false });
-  const end = () => {
-    if (y0 === null) return;
-    y0 = null;
+  const end = e => {
+    if (!t) return;
+    const { dragging, dy, lastT } = t;
+    const v = e.timeStamp - lastT > 80 ? 0 : t.v;
+    t = null;
     if (!dragging) return;
-    sheet.style.transition = '';
-    if (dy > 90) { sheet.style.transform = 'translateY(100%)'; setTimeout(closeSheet, 180); }
-    else sheet.style.transform = '';
+    if (dy > Math.min(140, sheet.offsetHeight * 0.3) || (v > 0.45 && dy > 16)) return closeSheet();
+    o.classList.remove('dragging');
+    sheet.style.transition = 'transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1)';
+    sheet.style.transform = '';
+    setDim(1);
   };
   sheet.addEventListener('touchend', end);
   sheet.addEventListener('touchcancel', end);
@@ -470,7 +510,7 @@ async function openDetail(id) {
   autoGrow(title);
   title.addEventListener('input', () => { autoGrow(title); it.title = title.value.trim(); save(it); render(); });
   title.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); title.blur(); } });
-  $('#d-close').onclick = closeSheet;
+  $('#d-close').onclick = () => closeSheet();
   $('#d-delete').onclick = () => { closeSheet(); deleteItem(id); };
   if (!it.hasAudio) { if (!it.title) title.focus(); return; }
 
@@ -566,7 +606,7 @@ function openSettings() {
     lang = b.dataset.l;
     $('#s-lang').innerHTML = langHTML(lang);
   };
-  $('#s-close').onclick = closeSheet;
+  $('#s-close').onclick = () => closeSheet();
   $('#s-save').onclick = () => {
     settings.set({ provider, lang, key: $('#s-key').value.trim(), model: $('#s-model').value.trim(), prompt: $('#s-prompt').value.trim() });
     closeSheet();
