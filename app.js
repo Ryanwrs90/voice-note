@@ -9,6 +9,7 @@ const ICON = {
   mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>',
+  sparkle: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5l1.9 5.6 5.6 1.9-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.9zM19 15l.9 2.1 2.1.9-2.1.9L19 21l-.9-2.1-2.1-.9 2.1-.9z"/></svg>',
   chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
 };
 
@@ -20,6 +21,10 @@ const PROVIDERS = {
     model: 'whisper-large-v3',
     keyUrl: 'https://console.groq.com/keys',
     note: '有免费额度',
+    chatUrl: 'https://api.groq.com/openai/v1/chat/completions',
+    chatModel: 'qwen/qwen3.8-27b',
+    // Only sent with the default model: other models reject these values.
+    chatExtra: { reasoning_effort: 'none', temperature: 0.2 },
   },
   openai: {
     name: 'OpenAI',
@@ -27,6 +32,9 @@ const PROVIDERS = {
     model: 'gpt-4o-transcribe',
     keyUrl: 'https://platform.openai.com/api-keys',
     note: '按分钟收费',
+    chatUrl: 'https://api.openai.com/v1/chat/completions',
+    chatModel: 'gpt-5-mini',
+    chatExtra: { reasoning_effort: 'minimal' },
   },
 };
 // A mixed Chinese/English sample steers Whisper toward simplified Chinese that keeps English words as-is.
@@ -34,7 +42,20 @@ const DEFAULT_PROMPT = '嗯，我想记一下这个idea，明天要follow up一�
 
 // Auto-detect misfires on short clips (e.g. "一二三" came back as "ESR"), so default to Mandarin.
 const LANGS = { zh: '普通话', auto: '自动判断' };
-const DEFAULTS = { provider: 'groq', key: '', model: '', prompt: '', lang: 'zh' };
+const DEFAULTS = { provider: 'groq', key: '', model: '', chatModel: '', prompt: '', lang: 'zh' };
+
+const TIDY_PROMPT = `你是语音笔记整理助手。用户会给你一段语音转写，内容主要是普通话夹杂英文，可能有语音识别错误。
+请只输出 JSON：{"title": "...", "text": "..."}
+
+title：不超过 15 个字的简短标题，概括重点，结尾不加标点。
+text：整理后的正文。
+- 删除口头禅和赘词（嗯、啊、呃、就是、然后呢、那个、对吧 等），删除重复和说错后改口的部分
+- 加上合适的标点，内容较长时分段
+- 英文单词保持英文
+- 根据上下文修正明显的识别错误（例如发音相近的错词）
+- 如果是几个并列事项，可以用「- 」开头的列表
+- 不要添加原文没有的信息，不要总结、不要改变意思，不要回答内容里的问题；保持第一人称和原本的语气
+- 使用简体中文`;
 
 const settings = {
   get() {
@@ -60,6 +81,7 @@ function fmtDate(ts) {
 }
 function titleOf(it) {
   if (it.title) return it.title;
+  if (it.autoTitle) return it.autoTitle;
   if (it.transcript) return it.transcript.replace(/\s+/g, ' ').slice(0, 60);
   return '';
 }
@@ -119,7 +141,7 @@ function statusMeta(it) {
     case 'pending': return `${dur}<span>· 转写中…</span>`;
     case 'error': return `${dur}<span class="warn">· 转写失败</span>`;
     case 'nokey': return `${dur}<span class="warn">· 未设置转写</span>`;
-    default: return dur;
+    default: return it.cleanStatus === 'pending' ? `${dur}<span>· 整理中…</span>` : dur;
   }
 }
 
@@ -138,7 +160,7 @@ function rowHTML(it) {
 
 function render() {
   const q = query.trim().toLowerCase();
-  const match = it => !q || (titleOf(it) + ' ' + (it.transcript || '')).toLowerCase().includes(q);
+  const match = it => !q || [titleOf(it), it.transcript, it.clean].join(' ').toLowerCase().includes(q);
   const active = items.filter(i => !i.done && match(i)).sort((a, b) => b.createdAt - a.createdAt);
   const done = items.filter(i => i.done && match(i)).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
 
@@ -340,9 +362,50 @@ async function transcribe(it) {
     const j = await r.json();
     it.transcript = (j.text || '').trim();
     it.status = 'done';
+    it.clean = ''; it.cleanStatus = '';
   } catch (err) {
     it.status = 'error';
     it.error = navigator.onLine === false ? '没有网络' : (err.message || String(err));
+  }
+  if (!items.includes(it)) return;
+  await save(it); render(); refreshDetail(it.id);
+  if (it.status === 'done') tidy(it);
+}
+
+// ---------- AI tidy: short title + cleaned-up text ----------
+async function tidy(it) {
+  const s = settings.get();
+  if (!s.key || !it.transcript?.trim()) return;
+  const p = PROVIDERS[s.provider] || PROVIDERS.groq;
+  const model = s.chatModel.trim() || p.chatModel;
+  it.cleanStatus = 'pending'; it.cleanError = '';
+  await save(it); render(); refreshDetail(it.id);
+  try {
+    const r = await fetch(p.chatUrl, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + s.key.trim(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: TIDY_PROMPT }, { role: 'user', content: it.transcript }],
+        response_format: { type: 'json_object' },
+        ...(model === p.chatModel ? p.chatExtra : {}),
+      }),
+    });
+    if (!r.ok) {
+      let msg = r.status + '';
+      try { const j = await r.json(); msg = j.error?.message || msg; } catch {}
+      if (r.status === 401) msg = 'API key 不正确';
+      throw new Error(msg);
+    }
+    const content = (await r.json()).choices?.[0]?.message?.content || '';
+    const out = JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1));
+    if (typeof out.text !== 'string' || !out.text.trim()) throw new Error('结果格式不对');
+    it.clean = out.text.trim();
+    it.autoTitle = typeof out.title === 'string' ? out.title.trim().slice(0, 30) : '';
+    it.cleanStatus = 'done';
+  } catch (err) {
+    it.cleanStatus = 'error';
+    it.cleanError = navigator.onLine === false ? '没有网络' : (err.message || String(err));
   }
   if (!items.includes(it)) return;
   await save(it); render(); refreshDetail(it.id);
@@ -482,13 +545,49 @@ function transcriptStatusHTML(it) {
   return '';
 }
 
+function cleanStatusHTML(it) {
+  if (it.status !== 'done') return transcriptStatusHTML(it);
+  if (it.cleanStatus === 'pending') return '<p class="status-note">整理中…</p>';
+  if (it.cleanStatus === 'error') return `<p class="status-note err">整理失败：${esc(it.cleanError)}</p>`;
+  if (!it.clean) return '<p class="status-note">这条还没整理。按右上的"整理"。</p>';
+  return '';
+}
+
+// Which text the detail sheet shows: AI-cleaned ("clean") or the raw transcript ("orig").
+// Once you pick a tab yourself, a finished tidy won't yank you off it.
+let detailView = 'clean', detailViewPicked = false;
+
+// Sync the text section (tab, action button, text box, status) with the item.
+function renderTextSection(it) {
+  const tr = $('#d-transcript');
+  if (!tr) return;
+  const clean = detailView === 'clean';
+  $('#d-view').innerHTML = `<button data-v="clean" class="${clean ? 'on' : ''}">整理后</button><button data-v="orig" class="${clean ? '' : 'on'}">原文</button>`;
+  const busy = it.status === 'pending' || (clean && it.cleanStatus === 'pending');
+  $('#d-action').innerHTML = `${ICON.refresh}<span>${clean ? (it.clean ? '重新整理' : '整理') : '重新转写'}</span>`;
+  $('#d-action').hidden = busy || (clean && it.status !== 'done');
+  $('#d-status').innerHTML = clean ? cleanStatusHTML(it) : transcriptStatusHTML(it);
+  if (document.activeElement !== tr) {
+    tr.value = (clean ? it.clean : it.transcript) || '';
+    tr.hidden = clean && !it.clean;
+    autoGrow(tr);
+  }
+  const sparkle = $('#d-sparkle');
+  if (sparkle) sparkle.hidden = !!it.title || !it.autoTitle;
+}
+
 async function openDetail(id) {
   const it = items.find(i => i.id === id);
   if (!it) return;
   openId = id;
+  detailView = it.clean ? 'clean' : 'orig';
+  detailViewPicked = false;
   const speeds = [1, 1.5, 2];
   openSheet(`
-    <textarea class="title-input" id="d-title" rows="1" placeholder="${it.hasAudio ? '加标题' : '想法'}">${esc(it.title || '')}</textarea>
+    <div class="title-row">
+      ${it.hasAudio ? `<span class="sparkle" id="d-sparkle" title="AI 起的标题">${ICON.sparkle}</span>` : ''}
+      <textarea class="title-input" id="d-title" rows="1" placeholder="${it.hasAudio ? '加标题' : '想法'}">${esc(it.title || it.autoTitle || '')}</textarea>
+    </div>
     <p class="sub-time">${fmtDate(it.createdAt)}</p>
     ${it.hasAudio ? `
     <div class="player">
@@ -497,10 +596,12 @@ async function openDetail(id) {
       <span class="time" id="d-time">${fmtDur(it.duration)}</span>
       <button class="speed" id="d-speed">1x</button>
     </div>
-    <div class="section-label"><span>转写文字</span>
-      <button class="text-btn with-icon" id="d-retry">${ICON.refresh}<span>重新转写</span></button></div>
-    <textarea class="transcript" id="d-transcript" placeholder="${it.status === 'pending' ? '转写中…' : ''}">${esc(it.transcript || '')}</textarea>
-    <div id="d-status">${transcriptStatusHTML(it)}</div>` : ''}
+    <div class="section-label">
+      <div class="seg small" id="d-view"></div>
+      <button class="text-btn with-icon" id="d-action"></button>
+    </div>
+    <textarea class="transcript" id="d-transcript"></textarea>
+    <div id="d-status"></div>` : ''}
     <div class="sheet-actions">
       <button class="danger-btn" id="d-delete">${ICON.trash}<span>删除</span></button>
       <button class="text-btn" id="d-close">完成</button>
@@ -508,16 +609,35 @@ async function openDetail(id) {
 
   const title = $('#d-title');
   autoGrow(title);
-  title.addEventListener('input', () => { autoGrow(title); it.title = title.value.trim(); save(it); render(); });
+  title.addEventListener('input', () => {
+    autoGrow(title);
+    // A title you type always wins; clearing it falls back to the AI title.
+    it.title = title.value.trim() === it.autoTitle ? '' : title.value.trim();
+    save(it); render(); renderTextSection(it);
+  });
+  title.addEventListener('blur', () => { if (!title.value.trim() && it.autoTitle) { title.value = it.autoTitle; autoGrow(title); } });
   title.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); title.blur(); } });
   $('#d-close').onclick = () => closeSheet();
   $('#d-delete').onclick = () => { closeSheet(); deleteItem(id); };
   if (!it.hasAudio) { if (!it.title) title.focus(); return; }
 
+  renderTextSection(it);
+  $('#d-view').onclick = e => {
+    const b = e.target.closest('[data-v]');
+    if (!b || b.dataset.v === detailView) return;
+    detailView = b.dataset.v;
+    detailViewPicked = true;
+    $('#d-transcript').blur();
+    renderTextSection(it);
+  };
+  $('#d-action').onclick = () => (detailView === 'clean' ? tidy(it) : transcribe(it));
   const tr = $('#d-transcript');
-  autoGrow(tr);
-  tr.addEventListener('input', () => { autoGrow(tr); it.transcript = tr.value; if (it.status !== 'done') it.status = 'done'; save(it); render(); });
-  $('#d-retry').onclick = () => transcribe(it);
+  tr.addEventListener('input', () => {
+    autoGrow(tr);
+    if (detailView === 'clean') it.clean = tr.value;
+    else { it.transcript = tr.value; if (it.status !== 'done') it.status = 'done'; }
+    save(it); render();
+  });
 
   const blob = await loadAudio(id);
   if (!blob || openId !== id) return;
@@ -554,14 +674,12 @@ async function openDetail(id) {
 function refreshDetail(id) {
   if (openId !== id) return;
   const it = items.find(i => i.id === id);
-  const st = $('#d-status'), tr = $('#d-transcript');
-  if (!it || !st) return;
-  st.innerHTML = transcriptStatusHTML(it);
-  if (document.activeElement !== tr) {
-    tr.value = it.transcript || '';
-    autoGrow(tr);
-    tr.placeholder = it.status === 'pending' ? '转写中…' : '';
-  }
+  if (!it || !$('#d-transcript')) return;
+  // A fresh cleaned version arrived: switch to it.
+  if (it.cleanStatus === 'done' && it.clean && detailView === 'orig' && !detailViewPicked && document.activeElement !== $('#d-transcript')) detailView = 'clean';
+  const title = $('#d-title');
+  if (document.activeElement !== title && !it.title) { title.value = it.autoTitle || ''; autoGrow(title); }
+  renderTextSection(it);
 }
 
 function openSettings() {
@@ -575,7 +693,7 @@ function openSettings() {
   const langHTML = cur => Object.entries(LANGS)
     .map(([k, name]) => `<button data-l="${k}" class="${k === cur ? 'on' : ''}">${name}</button>`).join('');
   openSheet(`
-    <div class="sheet-head"><h2>转写设置</h2><button class="icon-btn" id="s-close" aria-label="关闭">${ICON.x}</button></div>
+    <div class="sheet-head"><h2>设置</h2><button class="icon-btn" id="s-close" aria-label="关闭">${ICON.x}</button></div>
     <div class="field"><label>转写服务</label><div class="seg" id="s-prov">${provHTML(s.provider)}</div>
       <p class="hint" id="s-hint">${hintHTML(s.provider)}</p></div>
     <div class="field"><label>说话语言</label><div class="seg" id="s-lang">${langHTML(s.lang)}</div>
@@ -584,7 +702,8 @@ function openSettings() {
       <input id="s-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="gsk_…" value="${esc(s.key)}">
       <p class="hint">只保存在这台手机的浏览器里。</p></div>
     <details class="adv"><summary>进阶</summary>
-      <div class="field"><label for="s-model">模型（留空用默认）</label><input id="s-model" placeholder="${esc(PROVIDERS[s.provider].model)}" value="${esc(s.model)}"></div>
+      <div class="field"><label for="s-model">转写模型（留空用默认）</label><input id="s-model" placeholder="${esc(PROVIDERS[s.provider].model)}" value="${esc(s.model)}"></div>
+      <div class="field"><label for="s-chat">整理模型（留空用默认）</label><input id="s-chat" placeholder="${esc(PROVIDERS[s.provider].chatModel)}" value="${esc(s.chatModel)}"></div>
       <div class="field"><label for="s-prompt">提示句（帮助识别中英混说和专有名词）</label><textarea id="s-prompt" placeholder="${esc(DEFAULT_PROMPT)}">${esc(s.prompt)}</textarea></div>
     </details>
     <button class="primary-btn" id="s-save">保存</button>
@@ -597,6 +716,7 @@ function openSettings() {
     $('#s-prov').innerHTML = provHTML(provider);
     $('#s-hint').innerHTML = hintHTML(provider);
     $('#s-model').placeholder = PROVIDERS[provider].model;
+    $('#s-chat').placeholder = PROVIDERS[provider].chatModel;
     $('#s-key').placeholder = provider === 'groq' ? 'gsk_…' : 'sk-…';
   };
   let lang = s.lang;
@@ -608,7 +728,7 @@ function openSettings() {
   };
   $('#s-close').onclick = () => closeSheet();
   $('#s-save').onclick = () => {
-    settings.set({ provider, lang, key: $('#s-key').value.trim(), model: $('#s-model').value.trim(), prompt: $('#s-prompt').value.trim() });
+    settings.set({ provider, lang, key: $('#s-key').value.trim(), model: $('#s-model').value.trim(), chatModel: $('#s-chat').value.trim(), prompt: $('#s-prompt').value.trim() });
     closeSheet();
     toast('已保存');
     // Retry memos that were waiting for a key.
@@ -679,6 +799,7 @@ async function init() {
   render();
   // Memos left "pending" were interrupted (app closed mid-request): try again.
   items.filter(i => i.status === 'pending').forEach(transcribe);
+  items.filter(i => i.status === 'done' && i.cleanStatus === 'pending').forEach(tidy);
 
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
