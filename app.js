@@ -64,10 +64,18 @@ function titleOf(it) {
   return '';
 }
 let toastTimer;
-function toast(msg) {
+function toast(msg, action) {
   const t = $('#toast');
-  t.textContent = msg; t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 2800);
+  t.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'toast-act';
+    b.textContent = action.label;
+    b.onclick = () => { t.hidden = true; action.run(); };
+    t.append(b);
+  }
+  t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), action ? 4500 : 2800);
 }
 
 // ---------- state ----------
@@ -82,6 +90,25 @@ async function loadAudio(id) {
   const rec = await DB.getAudio(id);
   if (!rec) return null;
   return rec instanceof Blob ? rec : new Blob([rec.buf], { type: rec.type });
+}
+
+async function deleteItem(id) {
+  const it = items.find(i => i.id === id);
+  if (!it) return;
+  const audio = it.hasAudio ? await DB.getAudio(id) : null;
+  items = items.filter(i => i !== it);
+  await DB.deleteItem(id);
+  if (audio) await DB.deleteAudio(id);
+  render();
+  toast('已删除', {
+    label: '撤销',
+    run: async () => {
+      items.push(it);
+      await save(it);
+      if (audio) await DB.putAudio(id, audio);
+      render();
+    },
+  });
 }
 
 // ---------- list ----------
@@ -100,9 +127,12 @@ function rowHTML(it) {
   const t = titleOf(it);
   const title = t ? esc(t) : (it.status === 'pending' ? '转写中…' : '语音备忘');
   const meta = [statusMeta(it), `<span>${it.hasAudio ? '· ' : ''}${fmtDate(it.createdAt)}</span>`].join('');
-  return `<li class="row" data-id="${it.id}">
-    <button class="check${it.done ? ' on' : ''}" data-act="check" aria-label="${it.done ? '标为未完成' : '标为完成'}"></button>
-    <div class="body"><div class="title${t ? '' : ' muted'}">${title}</div><div class="meta">${meta}</div></div>
+  return `<li class="row-wrap" data-id="${it.id}">
+    <div class="swipe-bg" aria-hidden="true">${ICON.trash}<span>删除</span></div>
+    <div class="row">
+      <button class="check${it.done ? ' on' : ''}" data-act="check" aria-label="${it.done ? '标为未完成' : '标为完成'}"></button>
+      <div class="body"><div class="title${t ? '' : ' muted'}">${title}</div><div class="meta">${meta}</div></div>
+    </div>
   </li>`;
 }
 
@@ -130,9 +160,9 @@ function render() {
 }
 
 function onListClick(e) {
-  const row = e.target.closest('.row');
-  if (!row || !row.dataset.id) return;
-  const it = items.find(i => i.id === row.dataset.id);
+  const wrap = e.target.closest('[data-id]');
+  if (!wrap || wrap.querySelector('.row').dataset.swiped) return;
+  const it = items.find(i => i.id === wrap.dataset.id);
   if (!it) return;
   if (e.target.closest('[data-act="check"]')) {
     it.done = !it.done;
@@ -147,12 +177,52 @@ function onListClick(e) {
   openDetail(it.id);
 }
 
+// Swipe a row to the right to delete it (undo via toast).
+function enableSwipe(list) {
+  let s = null;
+  list.addEventListener('pointerdown', e => {
+    const row = e.target.closest('.row');
+    if (!row || !row.parentElement.dataset.id || e.button > 0) return;
+    s = { row, x0: e.clientX, y0: e.clientY, dx: 0, mode: null, pid: e.pointerId };
+  });
+  list.addEventListener('pointermove', e => {
+    if (!s || e.pointerId !== s.pid) return;
+    const dx = e.clientX - s.x0, dy = e.clientY - s.y0;
+    if (!s.mode) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      s.mode = dx > 0 && Math.abs(dx) > Math.abs(dy) ? 'swipe' : 'none';
+      if (s.mode === 'swipe') {
+        s.row.setPointerCapture(e.pointerId);
+        s.row.classList.remove('snap');
+      }
+    }
+    if (s.mode !== 'swipe') return;
+    s.dx = Math.max(0, dx);
+    s.row.style.transform = `translateX(${s.dx}px)`;
+  });
+  const end = e => {
+    if (!s || e.pointerId !== s.pid) return;
+    const { row, dx, mode } = s;
+    s = null;
+    if (mode !== 'swipe') return;
+    row.dataset.swiped = '1';
+    setTimeout(() => delete row.dataset.swiped, 300);
+    row.classList.add('snap');
+    if (dx > row.offsetWidth * 0.35) {
+      row.style.transform = 'translateX(100%)';
+      setTimeout(() => deleteItem(row.parentElement.dataset.id), 180);
+    } else row.style.transform = '';
+  };
+  list.addEventListener('pointerup', end);
+  list.addEventListener('pointercancel', end);
+}
+
 // ---------- new text item ----------
 function addText() {
   if ($('#list .row-input')) return $('#list .row-input').focus();
   const li = document.createElement('li');
-  li.className = 'row';
-  li.innerHTML = '<span class="check"></span><input class="row-input" placeholder="新想法" enterkeyhint="done">';
+  li.className = 'row-wrap';
+  li.innerHTML = '<div class="row"><span class="check"></span><input class="row-input" placeholder="新想法" enterkeyhint="done"></div>';
   $('#list').prepend(li);
   $('#empty').hidden = true;
   const input = li.querySelector('input');
@@ -267,6 +337,7 @@ async function transcribe(it) {
     it.status = 'error';
     it.error = navigator.onLine === false ? '没有网络' : (err.message || String(err));
   }
+  if (!items.includes(it)) return;
   await save(it); render(); refreshDetail(it.id);
 }
 
@@ -346,13 +417,7 @@ async function openDetail(id) {
   title.addEventListener('input', () => { grow(title); it.title = title.value.trim(); save(it); render(); });
   title.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); title.blur(); } });
   $('#d-close').onclick = closeSheet;
-  $('#d-delete').onclick = async () => {
-    if (!confirm('删除这条想法？录音也会一起删除。')) return;
-    items = items.filter(i => i.id !== id);
-    await DB.deleteItem(id);
-    if (it.hasAudio) await DB.deleteAudio(id);
-    closeSheet(); render();
-  };
+  $('#d-delete').onclick = () => { closeSheet(); deleteItem(id); };
   if (!it.hasAudio) { if (!it.title) title.focus(); return; }
 
   const tr = $('#d-transcript');
@@ -449,6 +514,23 @@ function openSettings() {
   };
 }
 
+// ---------- version / update ----------
+// version.json is the single source: the value seen at launch is "this" version;
+// a different value on a later check means a newer build is on the server.
+let loadedVersion = null;
+async function checkUpdate() {
+  let v;
+  try { v = (await (await fetch('version.json', { cache: 'no-store' })).json()).version; } catch { return; }
+  if (!v) return;
+  if (!loadedVersion) {
+    loadedVersion = v;
+    $('#version').textContent = 'v' + v;
+  } else if (v !== loadedVersion) {
+    $('#update').textContent = `新版本 v${v} · 点击更新`;
+    $('#update').hidden = false;
+  }
+}
+
 // ---------- search ----------
 function openSearch() {
   $('#search').hidden = false;
@@ -478,6 +560,11 @@ async function init() {
   $('#btn-settings').onclick = openSettings;
   $('#list').onclick = onListClick;
   $('#done-list').onclick = onListClick;
+  enableSwipe($('#list'));
+  enableSwipe($('#done-list'));
+  $('#update').onclick = () => location.reload();
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && checkUpdate());
+  checkUpdate();
   $('#done-toggle').onclick = () => { showDone = !showDone; render(); };
   $('#sheet-overlay').onclick = e => { if (e.target.id === 'sheet-overlay') closeSheet(); };
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#sheet-overlay').hidden) closeSheet(); });
