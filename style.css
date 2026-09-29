@@ -75,17 +75,23 @@ main { padding: 0 16px; }
 .list:empty { display: none; }
 .row-wrap { position: relative; }
 .swipe-bg {
-  position: absolute; inset: 0; background: var(--danger); color: #fff;
-  display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding-right: 18px; font-size: 14px;
+  position: absolute; inset: 0; background: var(--danger);
+  display: flex; justify-content: flex-end;
 }
 /* Only paint the red strip mid-swipe, so it can't peek out at row edges. */
 .row-wrap:not(.swiping) .swipe-bg { visibility: hidden; }
-.swipe-bg svg { width: 18px; height: 18px; }
+.swipe-del {
+  width: 84px; height: 100%; color: #fff; font-size: 13px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+}
+.swipe-del svg { width: 20px; height: 20px; }
+.row-wrap.collapsing { overflow: hidden; transition: height 0.22s ease, opacity 0.22s ease; opacity: 0; }
 .row {
   position: relative; display: flex; gap: 12px; align-items: flex-start; padding: 10px 14px;
   background: var(--card); cursor: pointer; touch-action: pan-y; user-select: none; -webkit-user-select: none;
 }
-.row.snap { transition: transform 0.2s ease; }
+.row.snap { transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.row-wrap.swiping .row { will-change: transform; }
 .row-wrap:not(:last-child) .row::after {
   content: ""; position: absolute; left: 48px; right: 0; bottom: 0; height: 0.5px; background: var(--line);
 }

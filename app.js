@@ -193,7 +193,7 @@ function rowHTML(it) {
   ].filter(Boolean);
   const meta = parts.map(p => `<span class="mp">${p}</span>`).join('<span class="sep">·</span>');
   return `<li class="row-wrap" data-id="${it.id}">
-    <div class="swipe-bg" aria-hidden="true"><span>删除</span>${ICON.trash}</div>
+    <div class="swipe-bg"><button class="swipe-del" tabindex="-1">${ICON.trash}<span>删除</span></button></div>
     <div class="row"${c ? ` style="--c:${c.color}"` : ''}>
       <button class="check${it.done ? ' on' : ''}" data-act="check" aria-label="${it.done ? '标为未完成' : '标为完成'}"></button>
       <div class="body"><div class="title${t ? '' : ' muted'}">${title}</div><div class="meta">${meta}</div></div>
@@ -237,7 +237,7 @@ function render() {
 
 function onListClick(e) {
   const wrap = e.target.closest('[data-id]');
-  if (!wrap || wrap.querySelector('.row').dataset.swiped) return;
+  if (!wrap || e.target.closest('.swipe-bg') || wrap.querySelector('.row').dataset.swiped) return;
   const it = items.find(i => i.id === wrap.dataset.id);
   if (!it) return;
   if (e.target.closest('[data-act="check"]')) {
@@ -253,49 +253,105 @@ function onListClick(e) {
   openDetail(it.id);
 }
 
-// Swipe a row to the left to delete it (undo via toast).
+// Swipe a row left to reveal a Delete button (like iOS); tapping it deletes (undo via toast).
+// Only one row stays open; tapping anywhere else or scrolling closes it.
+const OPEN_X = -84;
+let openRow = null, swallowClick = false;
+
+function setRowX(row, x, animate) {
+  row.classList.toggle('snap', !!animate);
+  row.style.transform = x ? `translateX(${x}px)` : '';
+  if (x) row.parentElement.classList.add('swiping');
+  else if (animate) setTimeout(() => { if (!row.style.transform) row.parentElement?.classList.remove('swiping'); }, 260);
+  else row.parentElement.classList.remove('swiping');
+}
+
+function closeOpenRow() {
+  const row = openRow;
+  openRow = null;
+  if (row && row.isConnected) { setRowX(row, 0, true); return true; }
+  return false;
+}
+
+// A tap outside the open row only closes it (same as iOS); it doesn't also open something.
+document.addEventListener('pointerdown', e => {
+  swallowClick = false; // a swallow only ever applies to the click of the same gesture
+  if (openRow && !openRow.parentElement.contains(e.target)) swallowClick = closeOpenRow();
+  else if (openRow && e.target.closest('.row') === openRow) {
+    // Tapping the open row itself closes it; a drag on it is handled by enableSwipe.
+    openRow.dataset.tapToClose = '1';
+  }
+}, true);
+document.addEventListener('click', e => {
+  if (!swallowClick) return;
+  swallowClick = false;
+  e.stopPropagation(); e.preventDefault();
+}, true);
+document.addEventListener('scroll', () => closeOpenRow(), { capture: true, passive: true });
+
+function collapseAndDelete(wrap, onDelete) {
+  openRow = null;
+  wrap.style.height = wrap.offsetHeight + 'px';
+  wrap.getBoundingClientRect();
+  wrap.classList.add('collapsing');
+  wrap.style.height = '0px';
+  setTimeout(() => onDelete(wrap.dataset.id), 230);
+}
+
 function enableSwipe(list, onDelete) {
-  let s = null;
+  let s = null, raf = 0;
   list.addEventListener('pointerdown', e => {
     const row = e.target.closest('.row');
     if (!row || !row.parentElement.dataset.id || e.button > 0) return;
     if (e.target.closest('.grip, input, .swatches')) return;
-    s = { row, x0: e.clientX, y0: e.clientY, dx: 0, mode: null, pid: e.pointerId };
+    const base = row === openRow ? OPEN_X : 0;
+    s = { row, x0: e.clientX, y0: e.clientY, base, x: base, mode: null, pid: e.pointerId, lastX: e.clientX, lastT: e.timeStamp, v: 0 };
   });
   list.addEventListener('pointermove', e => {
     if (!s || e.pointerId !== s.pid) return;
     const dx = e.clientX - s.x0, dy = e.clientY - s.y0;
     if (!s.mode) {
       if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
-      s.mode = dx < 0 && Math.abs(dx) > Math.abs(dy) ? 'swipe' : 'none';
-      if (s.mode === 'swipe') {
-        s.row.setPointerCapture(e.pointerId);
-        s.row.classList.remove('snap');
-        s.row.parentElement.classList.add('swiping');
-      }
+      const horizontal = Math.abs(dx) > Math.abs(dy);
+      s.mode = horizontal && (dx < 0 || s.base) ? 'swipe' : 'none';
+      if (s.mode !== 'swipe') return;
+      if (openRow && openRow !== s.row) closeOpenRow();
+      try { s.row.setPointerCapture(e.pointerId); } catch {}
+      s.row.classList.remove('snap');
+      s.row.parentElement.classList.add('swiping');
+      delete s.row.dataset.tapToClose;
     }
     if (s.mode !== 'swipe') return;
-    s.dx = Math.min(0, dx);
-    s.row.style.transform = `translateX(${s.dx}px)`;
+    const dt = Math.max(1, e.timeStamp - s.lastT);
+    s.v = 0.7 * ((e.clientX - s.lastX) / dt) + 0.3 * s.v;
+    s.lastX = e.clientX; s.lastT = e.timeStamp;
+    let x = Math.min(0, s.base + dx);
+    if (x < OPEN_X) x = OPEN_X + (x - OPEN_X) * 0.3; // rubber band past the button
+    s.x = x;
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (s) s.row.style.transform = `translateX(${s.x}px)`; });
   });
   const end = e => {
     if (!s || e.pointerId !== s.pid) return;
-    const { row, dx, mode } = s;
+    const { row, x, mode, v } = s;
     s = null;
+    if (row.dataset.tapToClose) {
+      delete row.dataset.tapToClose;
+      if (mode !== 'swipe') { closeOpenRow(); row.dataset.swiped = '1'; setTimeout(() => delete row.dataset.swiped, 300); return; }
+    }
     if (mode !== 'swipe') return;
+    cancelAnimationFrame(raf); raf = 0;
     row.dataset.swiped = '1';
     setTimeout(() => delete row.dataset.swiped, 300);
-    row.classList.add('snap');
-    if (-dx > row.offsetWidth * 0.35) {
-      row.style.transform = 'translateX(-100%)';
-      setTimeout(() => onDelete(row.parentElement.dataset.id), 180);
-    } else {
-      row.style.transform = '';
-      setTimeout(() => row.parentElement.classList.remove('swiping'), 220);
-    }
+    const open = v < -0.3 || (v <= 0.3 && x < OPEN_X / 2);
+    setRowX(row, open ? OPEN_X : 0, true);
+    openRow = open ? row : (openRow === row ? null : openRow);
   };
   list.addEventListener('pointerup', end);
   list.addEventListener('pointercancel', end);
+  list.addEventListener('click', e => {
+    const del = e.target.closest('.swipe-del');
+    if (del) collapseAndDelete(del.closest('.row-wrap'), onDelete);
+  });
 }
 
 // Recording inside a category tab files it there; under 全部 the AI picks.
@@ -852,7 +908,7 @@ let openCatId = null;
 function catRowHTML(c) {
   const open = c.id === openCatId;
   return `<li class="row-wrap" data-id="${c.id}">
-    <div class="swipe-bg" aria-hidden="true"><span>删除</span>${ICON.trash}</div>
+    <div class="swipe-bg"><button class="swipe-del" tabindex="-1">${ICON.trash}<span>删除</span></button></div>
     <div class="row cat-row${open ? ' open' : ''}">
       <span class="dot big" style="background:${c.color}"></span>
       ${open ? `<input class="cat-name" value="${esc(c.name)}" maxlength="12" enterkeyhint="done">` : `<span class="cat-label">${esc(c.name)}</span>`}
@@ -896,7 +952,7 @@ function setupCatEditor() {
 
   ul.addEventListener('click', e => {
     const li = e.target.closest('[data-id]');
-    if (!li || li.querySelector('.row').dataset.swiped) return;
+    if (!li || e.target.closest('.swipe-bg') || li.querySelector('.row').dataset.swiped) return;
     const c = cats.find(x => x.id === li.dataset.id);
     const sw = e.target.closest('[data-color]');
     if (sw) {
