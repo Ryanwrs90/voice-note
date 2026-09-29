@@ -10,6 +10,8 @@ const ICON = {
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>',
   sparkle: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5l1.9 5.6 5.6 1.9-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.9zM19 15l.9 2.1 2.1.9-2.1.9L19 21l-.9-2.1-2.1-.9 2.1-.9z"/></svg>',
+  chevronDown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+  grip: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>',
   chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
 };
 
@@ -45,7 +47,7 @@ const LANGS = { zh: '普通话', auto: '自动判断' };
 const DEFAULTS = { provider: 'groq', key: '', model: '', chatModel: '', prompt: '', lang: 'zh' };
 
 const TIDY_PROMPT = `你是语音笔记整理助手。用户会给你一段语音转写，内容主要是普通话夹杂英文，可能有语音识别错误。
-请只输出 JSON：{"title": "...", "text": "..."}
+请只输出 JSON：{"title": "...", "text": "...", "category": "..."}
 
 title：不超过 15 个字的简短标题，概括重点，结尾不加标点。
 text：整理后的正文。
@@ -55,7 +57,11 @@ text：整理后的正文。
 - 根据上下文修正明显的识别错误（例如发音相近的错词）
 - 如果是几个并列事项，可以用「- 」开头的列表
 - 不要添加原文没有的信息，不要总结、不要改变意思，不要回答内容里的问题；保持第一人称和原本的语气
-- 使用简体中文`;
+- 使用简体中文
+category：从下面的分类里选一个最合适的，只填分类名称；都不合适就填空字符串。`;
+
+const CLASSIFY_PROMPT = `你帮用户把一条笔记分类。从下面的分类里选一个最合适的，只填分类名称；都不合适就填空字符串。
+请只输出 JSON：{"category": "..."}`;
 
 const settings = {
   get() {
@@ -100,6 +106,31 @@ function toast(msg, action) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), action ? 4500 : 2800);
 }
 
+// ---------- categories ----------
+// No red on purpose: red already means "record" and "delete" in this app.
+const PALETTE = ['#F08A24', '#EFC127', '#46B04A', '#1D9E9A', '#378ADD', '#5E5CE6', '#9B59D0', '#E4589A'];
+const DEFAULT_CATS = [
+  { id: 'idea', name: 'Idea', color: '#EFC127' },
+  { id: 'todo', name: '待办', color: '#378ADD' },
+  { id: 'life', name: '生活', color: '#46B04A' },
+];
+function loadCats() {
+  try { const c = JSON.parse(localStorage.getItem('categories')); if (Array.isArray(c)) return c; } catch {}
+  return DEFAULT_CATS.map(c => ({ ...c }));
+}
+function saveCats() { try { localStorage.setItem('categories', JSON.stringify(cats)); } catch {} }
+let cats = loadCats();
+let currentCat = (() => { try { return localStorage.getItem('currentCat') || 'all'; } catch { return 'all'; } })();
+const catOf = it => cats.find(c => c.id === it.cat) || null;
+const catListText = () => cats.map(c => c.name).join('、');
+
+// Apply the AI's pick, unless you've chosen this item's category yourself.
+function applyAICat(it, name) {
+  if (it.catManual || typeof name !== 'string') return;
+  const c = cats.find(c => c.name.trim().toLowerCase() === name.trim().toLowerCase());
+  if (c) it.cat = c.id;
+}
+
 // ---------- state ----------
 let items = [];
 let query = '';
@@ -134,33 +165,55 @@ async function deleteItem(id) {
 }
 
 // ---------- list ----------
-function statusMeta(it) {
+function statusText(it) {
   if (!it.hasAudio) return '';
-  const dur = `${ICON.play}<span>${fmtDur(it.duration)}</span>`;
   switch (it.status) {
-    case 'pending': return `${dur}<span>· 转写中…</span>`;
-    case 'error': return `${dur}<span class="warn">· 转写失败</span>`;
-    case 'nokey': return `${dur}<span class="warn">· 未设置转写</span>`;
-    default: return it.cleanStatus === 'pending' ? `${dur}<span>· 整理中…</span>` : dur;
+    case 'pending': return '<span>转写中…</span>';
+    case 'error': return '<span class="warn">转写失败</span>';
+    case 'nokey': return '<span class="warn">未设置转写</span>';
+    default: return it.cleanStatus === 'pending' ? '<span>整理中…</span>' : '';
   }
+}
+
+function catTag(c) {
+  return `<span class="cat-tag"><span class="dot" style="background:${c.color}"></span>${esc(c.name)}</span>`;
 }
 
 function rowHTML(it) {
   const t = titleOf(it);
   const title = t ? esc(t) : (it.status === 'pending' ? '转写中…' : '语音备忘');
-  const meta = [statusMeta(it), `<span>${it.hasAudio ? '· ' : ''}${fmtDate(it.createdAt)}</span>`].join('');
+  const c = catOf(it);
+  // Inside a category the tag would just repeat the selected tab, so only show it under 全部 / search.
+  const showCat = c && (currentCat === 'all' || query.trim());
+  const parts = [
+    showCat ? catTag(c) : '',
+    it.hasAudio ? `${ICON.play}<span>${fmtDur(it.duration)}</span>` : '',
+    statusText(it),
+    `<span>${fmtDate(it.createdAt)}</span>`,
+  ].filter(Boolean);
+  const meta = parts.map(p => `<span class="mp">${p}</span>`).join('<span class="sep">·</span>');
   return `<li class="row-wrap" data-id="${it.id}">
     <div class="swipe-bg" aria-hidden="true"><span>删除</span>${ICON.trash}</div>
-    <div class="row">
+    <div class="row"${c ? ` style="--c:${c.color}"` : ''}>
       <button class="check${it.done ? ' on' : ''}" data-act="check" aria-label="${it.done ? '标为未完成' : '标为完成'}"></button>
       <div class="body"><div class="title${t ? '' : ' muted'}">${title}</div><div class="meta">${meta}</div></div>
     </div>
   </li>`;
 }
 
+function renderChips() {
+  if (currentCat !== 'all' && !cats.some(c => c.id === currentCat)) currentCat = 'all';
+  $('#chips').innerHTML = `<button class="chip${currentCat === 'all' ? ' on' : ''}" data-cat="all">全部</button>` +
+    cats.map(c => `<button class="chip${currentCat === c.id ? ' on' : ''}" data-cat="${c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.name)}</button>`).join('');
+}
+
 function render() {
   const q = query.trim().toLowerCase();
-  const match = it => !q || [titleOf(it), it.transcript, it.clean].join(' ').toLowerCase().includes(q);
+  renderChips();
+  // Search looks across every category; otherwise show the selected tab.
+  const match = it => q
+    ? [titleOf(it), it.transcript, it.clean].join(' ').toLowerCase().includes(q)
+    : currentCat === 'all' || it.cat === currentCat;
   const active = items.filter(i => !i.done && match(i)).sort((a, b) => b.createdAt - a.createdAt);
   const done = items.filter(i => i.done && match(i)).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
 
@@ -170,7 +223,8 @@ function render() {
   if (editing) list.prepend(editing.closest('li'));
 
   $('#empty').hidden = active.length > 0 || done.length > 0 || !!editing;
-  $('#empty').textContent = q ? '没有找到相关内容' : '按下面的红色按钮，把想法说出来';
+  $('#empty').textContent = q ? '没有找到相关内容'
+    : currentCat === 'all' ? '按下面的红色按钮，把想法说出来' : '这个分类还没有内容';
 
   const toggle = $('#done-toggle');
   toggle.hidden = done.length === 0;
@@ -200,11 +254,12 @@ function onListClick(e) {
 }
 
 // Swipe a row to the left to delete it (undo via toast).
-function enableSwipe(list) {
+function enableSwipe(list, onDelete) {
   let s = null;
   list.addEventListener('pointerdown', e => {
     const row = e.target.closest('.row');
     if (!row || !row.parentElement.dataset.id || e.button > 0) return;
+    if (e.target.closest('.grip, input, .swatches')) return;
     s = { row, x0: e.clientX, y0: e.clientY, dx: 0, mode: null, pid: e.pointerId };
   });
   list.addEventListener('pointermove', e => {
@@ -216,6 +271,7 @@ function enableSwipe(list) {
       if (s.mode === 'swipe') {
         s.row.setPointerCapture(e.pointerId);
         s.row.classList.remove('snap');
+        s.row.parentElement.classList.add('swiping');
       }
     }
     if (s.mode !== 'swipe') return;
@@ -232,11 +288,19 @@ function enableSwipe(list) {
     row.classList.add('snap');
     if (-dx > row.offsetWidth * 0.35) {
       row.style.transform = 'translateX(-100%)';
-      setTimeout(() => deleteItem(row.parentElement.dataset.id), 180);
-    } else row.style.transform = '';
+      setTimeout(() => onDelete(row.parentElement.dataset.id), 180);
+    } else {
+      row.style.transform = '';
+      setTimeout(() => row.parentElement.classList.remove('swiping'), 220);
+    }
   };
   list.addEventListener('pointerup', end);
   list.addEventListener('pointercancel', end);
+}
+
+// Recording inside a category tab files it there; under 全部 the AI picks.
+function newCatFields() {
+  return currentCat === 'all' ? { cat: null, catManual: false } : { cat: currentCat, catManual: true };
 }
 
 // ---------- new text item ----------
@@ -255,9 +319,10 @@ function addText() {
     const text = input.value.trim();
     li.remove();
     if (text) {
-      const it = { id: uid(), createdAt: Date.now(), title: text, hasAudio: false, done: false };
+      const it = { id: uid(), createdAt: Date.now(), title: text, hasAudio: false, done: false, ...newCatFields() };
       items.push(it);
       await save(it);
+      if (!it.catManual) classify(it);
     }
     render();
   };
@@ -316,7 +381,7 @@ async function stopRec(keep) {
   if (duration < 0.8) return toast('录音太短，没有保存');
 
   const blob = new Blob(chunks, { type });
-  const it = { id: uid(), createdAt: Date.now(), hasAudio: true, duration, done: false, status: 'pending' };
+  const it = { id: uid(), createdAt: Date.now(), hasAudio: true, duration, done: false, status: 'pending', ...newCatFields() };
   // Stored as ArrayBuffer: more reliable than Blob in Safari's IndexedDB.
   await DB.putAudio(it.id, { type: blob.type, buf: await blob.arrayBuffer() });
   items.push(it);
@@ -373,40 +438,56 @@ async function transcribe(it) {
 }
 
 // ---------- AI tidy: short title + cleaned-up text ----------
-async function tidy(it) {
+async function chatJSON(system, user) {
   const s = settings.get();
-  if (!s.key || !it.transcript?.trim()) return;
   const p = PROVIDERS[s.provider] || PROVIDERS.groq;
   const model = s.chatModel.trim() || p.chatModel;
+  const r = await fetch(p.chatUrl, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + s.key.trim(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      response_format: { type: 'json_object' },
+      ...(model === p.chatModel ? p.chatExtra : {}),
+    }),
+  });
+  if (!r.ok) {
+    let msg = r.status + '';
+    try { const j = await r.json(); msg = j.error?.message || msg; } catch {}
+    if (r.status === 401) msg = 'API key 不正确';
+    throw new Error(msg);
+  }
+  const content = (await r.json()).choices?.[0]?.message?.content || '';
+  return JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1));
+}
+
+async function tidy(it) {
+  if (!settings.get().key || !it.transcript?.trim()) return;
   it.cleanStatus = 'pending'; it.cleanError = '';
   await save(it); render(); refreshDetail(it.id);
   try {
-    const r = await fetch(p.chatUrl, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + s.key.trim(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'system', content: TIDY_PROMPT }, { role: 'user', content: it.transcript }],
-        response_format: { type: 'json_object' },
-        ...(model === p.chatModel ? p.chatExtra : {}),
-      }),
-    });
-    if (!r.ok) {
-      let msg = r.status + '';
-      try { const j = await r.json(); msg = j.error?.message || msg; } catch {}
-      if (r.status === 401) msg = 'API key 不正确';
-      throw new Error(msg);
-    }
-    const content = (await r.json()).choices?.[0]?.message?.content || '';
-    const out = JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1));
+    const out = await chatJSON(`${TIDY_PROMPT}\n分类：${catListText()}`, it.transcript);
     if (typeof out.text !== 'string' || !out.text.trim()) throw new Error('结果格式不对');
     it.clean = out.text.trim();
     it.autoTitle = typeof out.title === 'string' ? out.title.trim().slice(0, 30) : '';
+    applyAICat(it, out.category);
     it.cleanStatus = 'done';
   } catch (err) {
     it.cleanStatus = 'error';
     it.cleanError = navigator.onLine === false ? '没有网络' : (err.message || String(err));
   }
+  if (!items.includes(it)) return;
+  await save(it); render(); refreshDetail(it.id);
+}
+
+// Text notes skip transcription/tidy, so they only need a category.
+async function classify(it) {
+  if (!settings.get().key || !cats.length) return;
+  try {
+    const out = await chatJSON(`${CLASSIFY_PROMPT}\n分类：${catListText()}`, titleOf(it));
+    applyAICat(it, out.category);
+  } catch { return; }
   if (!items.includes(it)) return;
   await save(it); render(); refreshDetail(it.id);
 }
@@ -491,7 +572,7 @@ function enableSwipeClose(sheet) {
   let t = null;
   sheet.addEventListener('touchstart', e => {
     t = null;
-    if (e.touches.length > 1 || closeTimer) return;
+    if (e.touches.length > 1 || closeTimer || e.target.closest('.grip')) return;
     const f = e.target.closest('input, textarea, select');
     if (f && (f.type === 'range' || f === document.activeElement)) return;
     const y = e.touches[0].clientY;
@@ -588,7 +669,8 @@ async function openDetail(id) {
       ${it.hasAudio ? `<span class="sparkle" id="d-sparkle" title="AI 起的标题">${ICON.sparkle}</span>` : ''}
       <textarea class="title-input" id="d-title" rows="1" placeholder="${it.hasAudio ? '加标题' : '想法'}">${esc(it.title || it.autoTitle || '')}</textarea>
     </div>
-    <p class="sub-time">${fmtDate(it.createdAt)}</p>
+    <div class="sub-row"><span>${fmtDate(it.createdAt)}</span><span>·</span><button class="cat-btn" id="d-cat"></button></div>
+    <div class="cat-pick" id="d-catpick" hidden></div>
     ${it.hasAudio ? `
     <div class="player">
       <button class="play-btn" id="d-play" aria-label="播放">${ICON.play}</button>
@@ -619,6 +701,16 @@ async function openDetail(id) {
   title.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); title.blur(); } });
   $('#d-close').onclick = () => closeSheet();
   $('#d-delete').onclick = () => { closeSheet(); deleteItem(id); };
+  renderDetailCat(it);
+  $('#d-cat').onclick = () => { $('#d-catpick').hidden = !$('#d-catpick').hidden; };
+  $('#d-catpick').onclick = e => {
+    const b = e.target.closest('[data-cat]');
+    if (!b) return;
+    it.cat = b.dataset.cat || null;
+    it.catManual = true;
+    save(it); render(); renderDetailCat(it);
+    $('#d-catpick').hidden = true;
+  };
   if (!it.hasAudio) { if (!it.title) title.focus(); return; }
 
   renderTextSection(it);
@@ -671,6 +763,14 @@ async function openDetail(id) {
   };
 }
 
+function renderDetailCat(it) {
+  const c = catOf(it);
+  $('#d-cat').innerHTML = (c ? `<span class="dot" style="background:${c.color}"></span>${esc(c.name)}` : '未分类') + ICON.chevronDown;
+  $('#d-catpick').innerHTML = cats.map(x =>
+    `<button class="chip${x.id === it.cat ? ' on' : ''}" data-cat="${x.id}"><span class="dot" style="background:${x.color}"></span>${esc(x.name)}</button>`
+  ).join('') + `<button class="chip${c ? '' : ' on'}" data-cat="">不分类</button>`;
+}
+
 function refreshDetail(id) {
   if (openId !== id) return;
   const it = items.find(i => i.id === id);
@@ -679,6 +779,7 @@ function refreshDetail(id) {
   if (it.cleanStatus === 'done' && it.clean && detailView === 'orig' && !detailViewPicked && document.activeElement !== $('#d-transcript')) detailView = 'clean';
   const title = $('#d-title');
   if (document.activeElement !== title && !it.title) { title.value = it.autoTitle || ''; autoGrow(title); }
+  renderDetailCat(it);
   renderTextSection(it);
 }
 
@@ -694,6 +795,13 @@ function openSettings() {
     .map(([k, name]) => `<button data-l="${k}" class="${k === cur ? 'on' : ''}">${name}</button>`).join('');
   openSheet(`
     <div class="sheet-head"><h2>设置</h2><button class="icon-btn" id="s-close" aria-label="关闭">${ICON.x}</button></div>
+    <p class="sec-title">分类</p>
+    <ul class="list cat-list" id="s-cats"></ul>
+    <div class="cat-actions">
+      <button class="text-btn with-icon" id="s-cat-add">${ICON.plus}<span>新增分类</span></button>
+      <button class="text-btn quiet" id="s-cat-reset">恢复默认</button>
+    </div>
+    <p class="sec-title">转写和整理</p>
     <div class="field"><label>转写服务</label><div class="seg" id="s-prov">${provHTML(s.provider)}</div>
       <p class="hint" id="s-hint">${hintHTML(s.provider)}</p></div>
     <div class="field"><label>说话语言</label><div class="seg" id="s-lang">${langHTML(s.lang)}</div>
@@ -726,6 +834,7 @@ function openSettings() {
     lang = b.dataset.l;
     $('#s-lang').innerHTML = langHTML(lang);
   };
+  setupCatEditor();
   $('#s-close').onclick = () => closeSheet();
   $('#s-save').onclick = () => {
     settings.set({ provider, lang, key: $('#s-key').value.trim(), model: $('#s-model').value.trim(), chatModel: $('#s-chat').value.trim(), prompt: $('#s-prompt').value.trim() });
@@ -733,6 +842,138 @@ function openSettings() {
     toast('已保存');
     // Retry memos that were waiting for a key.
     items.filter(i => i.status === 'nokey').forEach(transcribe);
+  };
+}
+
+// ---------- category editor (in settings) ----------
+// Edits save immediately; the 保存 button only covers the transcription fields.
+let openCatId = null;
+
+function catRowHTML(c) {
+  const open = c.id === openCatId;
+  return `<li class="row-wrap" data-id="${c.id}">
+    <div class="swipe-bg" aria-hidden="true"><span>删除</span>${ICON.trash}</div>
+    <div class="row cat-row${open ? ' open' : ''}">
+      <span class="dot big" style="background:${c.color}"></span>
+      ${open ? `<input class="cat-name" value="${esc(c.name)}" maxlength="12" enterkeyhint="done">` : `<span class="cat-label">${esc(c.name)}</span>`}
+      <span class="grip" aria-label="拖动排序">${ICON.grip}</span>
+      ${open ? `<div class="swatches">${PALETTE.map(col =>
+        `<button class="swatch${col === c.color ? ' on' : ''}" data-color="${col}" style="background:${col}" aria-label="颜色"></button>`).join('')}</div>` : ''}
+    </div>
+  </li>`;
+}
+
+function renderCatList() {
+  const ul = $('#s-cats');
+  if (ul) ul.innerHTML = cats.map(catRowHTML).join('');
+}
+
+function catsChanged() { saveCats(); render(); }
+
+async function deleteCat(id) {
+  const idx = cats.findIndex(c => c.id === id);
+  if (idx < 0) return;
+  const cat = cats[idx];
+  const moved = items.filter(i => i.cat === id);
+  cats.splice(idx, 1);
+  moved.forEach(i => { i.cat = null; save(i); });
+  catsChanged(); renderCatList();
+  toast(`已删除「${cat.name}」`, {
+    label: '撤销',
+    run: () => {
+      cats.splice(idx, 0, cat);
+      moved.forEach(i => { i.cat = id; save(i); });
+      catsChanged(); renderCatList();
+    },
+  });
+}
+
+function setupCatEditor() {
+  openCatId = null;
+  renderCatList();
+  const ul = $('#s-cats');
+  enableSwipe(ul, deleteCat);
+
+  ul.addEventListener('click', e => {
+    const li = e.target.closest('[data-id]');
+    if (!li || li.querySelector('.row').dataset.swiped) return;
+    const c = cats.find(x => x.id === li.dataset.id);
+    const sw = e.target.closest('[data-color]');
+    if (sw) {
+      c.color = sw.dataset.color;
+      li.querySelector('.dot').style.background = c.color;
+      li.querySelectorAll('.swatch').forEach(b => b.classList.toggle('on', b === sw));
+      catsChanged();
+      return;
+    }
+    if (e.target.closest('input, .grip, .swatches')) return;
+    openCatId = openCatId === c.id ? null : c.id;
+    renderCatList();
+  });
+  ul.addEventListener('input', e => {
+    if (!e.target.matches('.cat-name')) return;
+    const c = cats.find(x => x.id === e.target.closest('[data-id]').dataset.id);
+    if (e.target.value.trim()) { c.name = e.target.value.trim(); catsChanged(); }
+  });
+  ul.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('.cat-name')) e.target.blur(); });
+  ul.addEventListener('focusout', e => {
+    if (!e.target.matches('.cat-name')) return;
+    const c = cats.find(x => x.id === e.target.closest('[data-id]').dataset.id);
+    if (c && !e.target.value.trim()) e.target.value = c.name;
+  });
+
+  // Drag the grip to reorder.
+  ul.addEventListener('pointerdown', e => {
+    const grip = e.target.closest('.grip');
+    if (!grip) return;
+    e.preventDefault();
+    const li = grip.closest('.row-wrap');
+    const pid = e.pointerId;
+    li.classList.add('lifted');
+    const move = ev => {
+      if (ev.pointerId !== pid) return;
+      const after = [...ul.children].filter(x => x !== li)
+        .find(x => { const r = x.getBoundingClientRect(); return ev.clientY < r.top + r.height / 2; });
+      if (after) { if (li.nextElementSibling !== after) ul.insertBefore(li, after); }
+      else if (ul.lastElementChild !== li) ul.appendChild(li);
+    };
+    const up = ev => {
+      if (ev.pointerId !== pid) return;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      li.classList.remove('lifted');
+      cats = [...ul.children].map(x => cats.find(c => c.id === x.dataset.id));
+      catsChanged();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  });
+
+  $('#s-cat-add').onclick = () => {
+    const used = new Set(cats.map(c => c.color));
+    const c = { id: uid(), name: '新分类', color: PALETTE.find(x => !used.has(x)) || PALETTE[0] };
+    cats.push(c);
+    openCatId = c.id;
+    catsChanged(); renderCatList();
+    const input = $(`#s-cats [data-id="${c.id}"] .cat-name`);
+    input.focus(); input.select();
+  };
+  $('#s-cat-reset').onclick = () => {
+    const before = cats, beforeCats = new Map(items.map(i => [i, i.cat]));
+    cats = DEFAULT_CATS.map(c => ({ ...c }));
+    items.forEach(i => { if (i.cat && !cats.some(c => c.id === i.cat)) { i.cat = null; save(i); } });
+    openCatId = null;
+    catsChanged(); renderCatList();
+    toast('已恢复默认分类', {
+      label: '撤销',
+      run: () => {
+        cats = before;
+        items.forEach(i => { if (beforeCats.has(i) && i.cat !== beforeCats.get(i)) { i.cat = beforeCats.get(i); save(i); } });
+        catsChanged(); renderCatList();
+      },
+    });
   };
 }
 
@@ -781,8 +1022,16 @@ async function init() {
   $('#btn-settings').onclick = openSettings;
   $('#list').onclick = onListClick;
   $('#done-list').onclick = onListClick;
-  enableSwipe($('#list'));
-  enableSwipe($('#done-list'));
+  enableSwipe($('#list'), deleteItem);
+  enableSwipe($('#done-list'), deleteItem);
+  $('#chips').onclick = e => {
+    const b = e.target.closest('[data-cat]');
+    if (!b || b.dataset.cat === currentCat) return;
+    currentCat = b.dataset.cat;
+    try { localStorage.setItem('currentCat', currentCat); } catch {}
+    render();
+    $(`#chips [data-cat="${currentCat}"]`).scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' });
+  };
   $('#update').onclick = () => location.reload();
   enableSwipeClose($('#sheet'));
   window.visualViewport?.addEventListener('resize', fitOverlay);

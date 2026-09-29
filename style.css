@@ -9,6 +9,7 @@
   --rec: #ff3b30;
   --danger: #ff3b30;
   --field: rgba(118, 118, 128, 0.12);
+  --field-solid: #efeff2; /* opaque twin of --field on a card, for rows that slide over a swipe strip */
   --overlay: rgba(0, 0, 0, 0.32);
   --safe-b: env(safe-area-inset-bottom, 0px);
   color-scheme: light dark;
@@ -25,6 +26,7 @@
     --rec: #ff453a;
     --danger: #ff453a;
     --field: rgba(118, 118, 128, 0.24);
+    --field-solid: #2c2c2e;
     --overlay: rgba(0, 0, 0, 0.55);
   }
 }
@@ -76,6 +78,8 @@ main { padding: 0 16px; }
   position: absolute; inset: 0; background: var(--danger); color: #fff;
   display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding-right: 18px; font-size: 14px;
 }
+/* Only paint the red strip mid-swipe, so it can't peek out at row edges. */
+.row-wrap:not(.swiping) .swipe-bg { visibility: hidden; }
 .swipe-bg svg { width: 18px; height: 18px; }
 .row {
   position: relative; display: flex; gap: 12px; align-items: flex-start; padding: 10px 14px;
@@ -91,14 +95,32 @@ main { padding: 0 16px; }
   border: 1.5px solid var(--text-3); display: grid; place-items: center;
 }
 .check::before { content: ""; position: absolute; inset: -11px; }
-.check.on { border-color: var(--accent); }
-.check.on::after { content: ""; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); }
+.row[style*="--c"] .check { border-color: var(--c); }
+.check.on { border-color: var(--c, var(--accent)); }
+.check.on::after { content: ""; width: 14px; height: 14px; border-radius: 50%; background: var(--c, var(--accent)); }
 .row .body { flex: 1; min-width: 0; }
 .row .title { overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
 .row .title.muted { color: var(--text-3); }
 .done-list .row .title { color: var(--text-3); }
 .meta { font-size: 12px; color: var(--text-2); margin-top: 2px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .meta svg { width: 11px; height: 11px; }
+.meta .mp { display: inline-flex; align-items: center; gap: 3px; }
+.meta .sep { color: var(--text-3); }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.dot.big { width: 12px; height: 12px; }
+.cat-tag { display: inline-flex; align-items: center; gap: 4px; }
+
+/* category chips */
+.chips {
+  display: flex; gap: 6px; overflow-x: auto; padding: 0 16px 10px;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+.chips::-webkit-scrollbar { display: none; }
+.chip {
+  flex: none; height: 30px; padding: 0 12px; border-radius: 999px; display: inline-flex; align-items: center; gap: 6px;
+  background: var(--card); border: 0.5px solid var(--line); font-size: 14px; white-space: nowrap;
+}
+.chip.on { background: var(--text); color: var(--bg); border-color: var(--text); }
 .meta .warn { color: #e08600; }
 .row-input { flex: 1; border: 0; outline: none; background: none; padding: 0; font-size: 16px; }
 
@@ -126,7 +148,7 @@ main { padding: 0 16px; }
 .rec-btn:active .rec-inner { transform: scale(0.92); }
 .rec-btn.recording .rec-inner { width: 24px; height: 24px; border-radius: 6px; }
 .rec-time { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; color: var(--text); font-size: 15px; min-width: 60px; justify-content: flex-end; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rec); animation: pulse 1.2s infinite; }
+.rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rec); animation: pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 
 /* sheet */
@@ -157,6 +179,12 @@ main { padding: 0 16px; }
   font-size: 20px; font-weight: 600; padding: 4px 0; line-height: 1.35;
 }
 .title-input::placeholder { color: var(--text-3); font-weight: 500; }
+.sub-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); margin: 0 0 12px; }
+.cat-btn { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text); padding: 3px 8px; border-radius: 999px; background: var(--field); }
+.cat-btn svg { width: 11px; height: 11px; color: var(--text-2); }
+.cat-pick { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 14px; }
+.cat-pick .chip { height: 28px; font-size: 13px; background: var(--field); border-color: transparent; }
+.cat-pick .chip.on { background: var(--text); color: var(--bg); }
 .sub-time { font-size: 12px; color: var(--text-2); margin: 0 0 12px; }
 
 .player { display: flex; align-items: center; gap: 10px; background: var(--field); border-radius: 12px; padding: 8px 12px 8px 8px; margin-bottom: 16px; }
@@ -192,6 +220,19 @@ main { padding: 0 16px; }
 .text-btn.with-icon { display: flex; align-items: center; gap: 6px; }
 
 /* settings */
+.sec-title { font-size: 13px; color: var(--text-2); margin: 6px 2px 6px; }
+.cat-list .row { background: var(--field-solid); align-items: center; flex-wrap: wrap; row-gap: 10px; padding: 11px 14px; }
+.cat-list .row-wrap:not(:last-child) .row::after { left: 38px; }
+.cat-label { flex: 1; }
+.cat-name { flex: 1; min-width: 0; border: 0; outline: none; background: var(--field); border-radius: 8px; padding: 5px 8px; font-size: 16px; }
+.grip { width: 28px; height: 28px; display: grid; place-items: center; color: var(--text-3); touch-action: none; cursor: grab; margin: -6px -6px -6px 0; }
+.grip svg { width: 16px; height: 16px; }
+.swatches { flex-basis: 100%; display: flex; gap: 10px; padding-left: 24px; }
+.swatch { width: 26px; height: 26px; border-radius: 50%; }
+.swatch.on { box-shadow: 0 0 0 2px var(--field-solid), 0 0 0 4px var(--text); }
+.row-wrap.lifted .row { box-shadow: 0 4px 14px rgba(0,0,0,0.15); position: relative; z-index: 2; }
+.cat-actions { display: flex; justify-content: space-between; align-items: center; margin: 8px 2px 18px; }
+.text-btn.quiet { color: var(--text-2); font-size: 14px; }
 .field { margin-bottom: 14px; }
 .field label { display: block; font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
 .field input, .field select, .field textarea {
