@@ -128,7 +128,7 @@ function rowHTML(it) {
   const title = t ? esc(t) : (it.status === 'pending' ? '转写中…' : '语音备忘');
   const meta = [statusMeta(it), `<span>${it.hasAudio ? '· ' : ''}${fmtDate(it.createdAt)}</span>`].join('');
   return `<li class="row-wrap" data-id="${it.id}">
-    <div class="swipe-bg" aria-hidden="true">${ICON.trash}<span>删除</span></div>
+    <div class="swipe-bg" aria-hidden="true"><span>删除</span>${ICON.trash}</div>
     <div class="row">
       <button class="check${it.done ? ' on' : ''}" data-act="check" aria-label="${it.done ? '标为未完成' : '标为完成'}"></button>
       <div class="body"><div class="title${t ? '' : ' muted'}">${title}</div><div class="meta">${meta}</div></div>
@@ -177,7 +177,7 @@ function onListClick(e) {
   openDetail(it.id);
 }
 
-// Swipe a row to the right to delete it (undo via toast).
+// Swipe a row to the left to delete it (undo via toast).
 function enableSwipe(list) {
   let s = null;
   list.addEventListener('pointerdown', e => {
@@ -190,14 +190,14 @@ function enableSwipe(list) {
     const dx = e.clientX - s.x0, dy = e.clientY - s.y0;
     if (!s.mode) {
       if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
-      s.mode = dx > 0 && Math.abs(dx) > Math.abs(dy) ? 'swipe' : 'none';
+      s.mode = dx < 0 && Math.abs(dx) > Math.abs(dy) ? 'swipe' : 'none';
       if (s.mode === 'swipe') {
         s.row.setPointerCapture(e.pointerId);
         s.row.classList.remove('snap');
       }
     }
     if (s.mode !== 'swipe') return;
-    s.dx = Math.max(0, dx);
+    s.dx = Math.min(0, dx);
     s.row.style.transform = `translateX(${s.dx}px)`;
   });
   const end = e => {
@@ -208,8 +208,8 @@ function enableSwipe(list) {
     row.dataset.swiped = '1';
     setTimeout(() => delete row.dataset.swiped, 300);
     row.classList.add('snap');
-    if (dx > row.offsetWidth * 0.35) {
-      row.style.transform = 'translateX(100%)';
+    if (-dx > row.offsetWidth * 0.35) {
+      row.style.transform = 'translateX(-100%)';
       setTimeout(() => deleteItem(row.parentElement.dataset.id), 180);
     } else row.style.transform = '';
   };

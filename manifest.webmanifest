@@ -1,6 +1,6 @@
 {
-  "name": "想法",
-  "short_name": "想法",
+  "name": "随手记",
+  "short_name": "随手记",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

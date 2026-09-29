@@ -74,7 +74,7 @@ main { padding: 0 16px; }
 .row-wrap { position: relative; }
 .swipe-bg {
   position: absolute; inset: 0; background: var(--danger); color: #fff;
-  display: flex; align-items: center; gap: 6px; padding-left: 18px; font-size: 14px;
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding-right: 18px; font-size: 14px;
 }
 .swipe-bg svg { width: 18px; height: 18px; }
 .row {
