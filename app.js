@@ -32,10 +32,14 @@ const PROVIDERS = {
 // A mixed Chinese/English sample steers Whisper toward simplified Chinese that keeps English words as-is.
 const DEFAULT_PROMPT = '嗯，我想记一下这个idea，明天要follow up一下meeting的内容，然后send个email给John。';
 
+// Auto-detect misfires on short clips (e.g. "一二三" came back as "ESR"), so default to Mandarin.
+const LANGS = { zh: '普通话', auto: '自动判断' };
+const DEFAULTS = { provider: 'groq', key: '', model: '', prompt: '', lang: 'zh' };
+
 const settings = {
   get() {
-    try { return { provider: 'groq', key: '', model: '', prompt: '', ...JSON.parse(localStorage.getItem('settings') || '{}') }; }
-    catch { return { provider: 'groq', key: '', model: '', prompt: '' }; }
+    try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('settings') || '{}') }; }
+    catch { return { ...DEFAULTS }; }
   },
   set(v) { try { localStorage.setItem('settings', JSON.stringify(v)); } catch {} },
 };
@@ -247,6 +251,7 @@ async function transcribe(it) {
     fd.append('file', blob, 'memo.' + extFor(blob.type));
     fd.append('model', s.model.trim() || p.model);
     fd.append('prompt', s.prompt.trim() || DEFAULT_PROMPT);
+    if (s.lang !== 'auto') fd.append('language', s.lang);
     fd.append('response_format', 'json');
     const r = await fetch(p.url, { method: 'POST', headers: { Authorization: 'Bearer ' + s.key.trim() }, body: fd });
     if (!r.ok) {
@@ -401,10 +406,14 @@ function openSettings() {
     const p = PROVIDERS[k];
     return `${p.note}。<a href="${p.keyUrl}" target="_blank" rel="noopener">去 ${p.name} 拿 API key</a>`;
   };
+  const langHTML = cur => Object.entries(LANGS)
+    .map(([k, name]) => `<button data-l="${k}" class="${k === cur ? 'on' : ''}">${name}</button>`).join('');
   openSheet(`
     <div class="sheet-head"><h2>转写设置</h2><button class="icon-btn" id="s-close" aria-label="关闭">${ICON.x}</button></div>
     <div class="field"><label>转写服务</label><div class="seg" id="s-prov">${provHTML(s.provider)}</div>
       <p class="hint" id="s-hint">${hintHTML(s.provider)}</p></div>
+    <div class="field"><label>说话语言</label><div class="seg" id="s-lang">${langHTML(s.lang)}</div>
+      <p class="hint">中文夹英文选普通话，英文单词会保留。</p></div>
     <div class="field"><label for="s-key">API key</label>
       <input id="s-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="gsk_…" value="${esc(s.key)}">
       <p class="hint">只保存在这台手机的浏览器里。</p></div>
@@ -423,9 +432,16 @@ function openSettings() {
     $('#s-model').placeholder = PROVIDERS[provider].model;
     $('#s-key').placeholder = provider === 'groq' ? 'gsk_…' : 'sk-…';
   };
+  let lang = s.lang;
+  $('#s-lang').onclick = e => {
+    const b = e.target.closest('[data-l]');
+    if (!b) return;
+    lang = b.dataset.l;
+    $('#s-lang').innerHTML = langHTML(lang);
+  };
   $('#s-close').onclick = closeSheet;
   $('#s-save').onclick = () => {
-    settings.set({ provider, key: $('#s-key').value.trim(), model: $('#s-model').value.trim(), prompt: $('#s-prompt').value.trim() });
+    settings.set({ provider, lang, key: $('#s-key').value.trim(), model: $('#s-model').value.trim(), prompt: $('#s-prompt').value.trim() });
     closeSheet();
     toast('已保存');
     // Retry memos that were waiting for a key.
