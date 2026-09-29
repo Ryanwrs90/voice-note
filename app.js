@@ -247,6 +247,11 @@ function addText() {
 // ---------- recording ----------
 let rec = null, recStream = null, recChunks = [], recStart = 0, recTimer = null;
 
+// Safari's Audio Session API: record mode while recording, loudspeaker playback otherwise.
+function setAudioSession(type) {
+  try { if (navigator.audioSession) navigator.audioSession.type = type; } catch {}
+}
+
 function pickMime() {
   if (!window.MediaRecorder) return '';
   return ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'].find(t => MediaRecorder.isTypeSupported(t)) || '';
@@ -254,6 +259,7 @@ function pickMime() {
 
 async function startRec() {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return toast('这个浏览器不支持录音');
+  setAudioSession('play-and-record');
   try {
     recStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
   } catch (err) {
@@ -278,6 +284,7 @@ async function stopRec(keep) {
   const duration = (Date.now() - recStart) / 1000;
   await new Promise(r => { rec.onstop = r; rec.stop(); });
   recStream.getTracks().forEach(t => t.stop());
+  setAudioSession('playback');
   const type = rec.mimeType || pickMime() || 'audio/mp4';
   const chunks = recChunks;
   rec = null; recStream = null; recChunks = [];
@@ -348,36 +355,84 @@ function openSheet(html) {
   const sheet = $('#sheet');
   sheet.innerHTML = '<div class="grab"></div>' + html;
   sheet.style.transform = '';
+  sheet.scrollTop = 0;
+  if ($('#sheet-overlay').hidden) lockScroll();
   $('#sheet-overlay').hidden = false;
-  enableSwipeClose(sheet);
+  fitOverlay();
 }
 
 function closeSheet() {
+  if (document.activeElement) document.activeElement.blur();
   $('#sheet-overlay').hidden = true;
   $('#sheet').innerHTML = '';
   openId = null;
+  unlockScroll();
   if (audioEl) { audioEl.pause(); audioEl = null; }
   if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
 }
 
+// While a sheet is open, pin the page underneath so swipes inside the sheet
+// can't scroll the list behind it (iOS ignores overflow:hidden on its own).
+let lockedY = 0;
+function lockScroll() {
+  lockedY = window.scrollY;
+  document.documentElement.classList.add('locked');
+  document.body.style.top = `-${lockedY}px`;
+}
+function unlockScroll() {
+  if (!document.documentElement.classList.contains('locked')) return;
+  document.documentElement.classList.remove('locked');
+  document.body.style.top = '';
+  window.scrollTo(0, lockedY);
+}
+
+// Keep the sheet above the iOS keyboard: size the overlay to the visible viewport.
+function fitOverlay() {
+  const vv = window.visualViewport, o = $('#sheet-overlay');
+  if (!vv || o.hidden) return;
+  o.style.top = vv.offsetTop + 'px';
+  o.style.height = vv.height + 'px';
+}
+
+// Drag the sheet down to close: from the handle, or from anywhere once its content is scrolled to the top.
 function enableSwipeClose(sheet) {
-  const grab = sheet.querySelector('.grab');
-  let y0 = null, dy = 0;
-  const start = e => { y0 = (e.touches ? e.touches[0] : e).clientY; dy = 0; sheet.style.transition = 'none'; };
-  const move = e => {
+  let y0 = null, dy = 0, dragging = false, fromTop = false;
+  sheet.addEventListener('touchstart', e => {
+    y0 = null;
+    if (e.touches.length > 1) return;
+    const onGrab = !!e.target.closest('.grab');
+    if (!onGrab && e.target.closest('input, textarea, select')) return;
+    y0 = e.touches[0].clientY; dy = 0; dragging = false;
+    fromTop = onGrab || sheet.scrollTop <= 0;
+  }, { passive: true });
+  sheet.addEventListener('touchmove', e => {
     if (y0 === null) return;
-    dy = Math.max(0, (e.touches ? e.touches[0] : e).clientY - y0);
+    const d = e.touches[0].clientY - y0;
+    if (!dragging) {
+      if (fromTop && d > 6) { dragging = true; sheet.style.transition = 'none'; }
+      else if (Math.abs(d) > 6) { y0 = null; return; }
+      else return;
+    }
+    e.preventDefault();
+    dy = Math.max(0, d);
     sheet.style.transform = `translateY(${dy}px)`;
-  };
+  }, { passive: false });
   const end = () => {
     if (y0 === null) return;
-    y0 = null; sheet.style.transition = '';
+    y0 = null;
+    if (!dragging) return;
+    sheet.style.transition = '';
     if (dy > 90) { sheet.style.transform = 'translateY(100%)'; setTimeout(closeSheet, 180); }
     else sheet.style.transform = '';
   };
-  grab.addEventListener('touchstart', start, { passive: true });
-  grab.addEventListener('touchmove', move, { passive: true });
-  grab.addEventListener('touchend', end);
+  sheet.addEventListener('touchend', end);
+  sheet.addEventListener('touchcancel', end);
+}
+
+// Text boxes grow with their content so the sheet is the only thing that scrolls.
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 'px';
 }
 
 function transcriptStatusHTML(it) {
@@ -412,16 +467,16 @@ async function openDetail(id) {
     </div>`);
 
   const title = $('#d-title');
-  const grow = el => { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; };
-  grow(title);
-  title.addEventListener('input', () => { grow(title); it.title = title.value.trim(); save(it); render(); });
+  autoGrow(title);
+  title.addEventListener('input', () => { autoGrow(title); it.title = title.value.trim(); save(it); render(); });
   title.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); title.blur(); } });
   $('#d-close').onclick = closeSheet;
   $('#d-delete').onclick = () => { closeSheet(); deleteItem(id); };
   if (!it.hasAudio) { if (!it.title) title.focus(); return; }
 
   const tr = $('#d-transcript');
-  tr.addEventListener('input', () => { it.transcript = tr.value; if (it.status !== 'done') it.status = 'done'; save(it); render(); });
+  autoGrow(tr);
+  tr.addEventListener('input', () => { autoGrow(tr); it.transcript = tr.value; if (it.status !== 'done') it.status = 'done'; save(it); render(); });
   $('#d-retry').onclick = () => transcribe(it);
 
   const blob = await loadAudio(id);
@@ -436,13 +491,18 @@ async function openDetail(id) {
   audioEl.ontimeupdate = () => {
     if (dragging) return;
     seek.value = Math.round((audioEl.currentTime / total()) * 1000);
+    seek.style.setProperty('--p', seek.value / 10 + '%');
     time.textContent = fmtDur(audioEl.currentTime);
   };
   audioEl.onplay = () => { playBtn.innerHTML = ICON.pause; playBtn.setAttribute('aria-label', '暂停'); };
   audioEl.onpause = () => { playBtn.innerHTML = ICON.play; playBtn.setAttribute('aria-label', '播放'); };
-  audioEl.onended = () => { playBtn.innerHTML = ICON.play; seek.value = 0; time.textContent = fmtDur(it.duration); };
-  playBtn.onclick = () => (audioEl.paused ? audioEl.play().catch(() => toast('无法播放')) : audioEl.pause());
-  seek.oninput = () => { dragging = true; time.textContent = fmtDur((seek.value / 1000) * total()); };
+  audioEl.onended = () => { playBtn.innerHTML = ICON.play; seek.value = 0; seek.style.setProperty('--p', '0%'); time.textContent = fmtDur(it.duration); };
+  playBtn.onclick = () => {
+    if (!audioEl.paused) return audioEl.pause();
+    setAudioSession('playback');
+    audioEl.play().catch(() => toast('无法播放'));
+  };
+  seek.oninput = () => { dragging = true; seek.style.setProperty('--p', seek.value / 10 + '%'); time.textContent = fmtDur((seek.value / 1000) * total()); };
   seek.onchange = () => { audioEl.currentTime = (seek.value / 1000) * total(); dragging = false; };
   $('#d-speed').onclick = e => {
     si = (si + 1) % speeds.length;
@@ -459,6 +519,7 @@ function refreshDetail(id) {
   st.innerHTML = transcriptStatusHTML(it);
   if (document.activeElement !== tr) {
     tr.value = it.transcript || '';
+    autoGrow(tr);
     tr.placeholder = it.status === 'pending' ? '转写中…' : '';
   }
 }
@@ -486,7 +547,8 @@ function openSettings() {
       <div class="field"><label for="s-model">模型（留空用默认）</label><input id="s-model" placeholder="${esc(PROVIDERS[s.provider].model)}" value="${esc(s.model)}"></div>
       <div class="field"><label for="s-prompt">提示句（帮助识别中英混说和专有名词）</label><textarea id="s-prompt" placeholder="${esc(DEFAULT_PROMPT)}">${esc(s.prompt)}</textarea></div>
     </details>
-    <button class="primary-btn" id="s-save">保存</button>`);
+    <button class="primary-btn" id="s-save">保存</button>
+    <p class="version">版本 v${esc(loadedVersion || '')}</p>`);
   let provider = s.provider;
   $('#s-prov').onclick = e => {
     const b = e.target.closest('[data-p]');
@@ -524,7 +586,6 @@ async function checkUpdate() {
   if (!v) return;
   if (!loadedVersion) {
     loadedVersion = v;
-    $('#version').textContent = 'v' + v;
   } else if (v !== loadedVersion) {
     $('#update').textContent = `新版本 v${v} · 点击更新`;
     $('#update').hidden = false;
@@ -563,6 +624,11 @@ async function init() {
   enableSwipe($('#list'));
   enableSwipe($('#done-list'));
   $('#update').onclick = () => location.reload();
+  enableSwipeClose($('#sheet'));
+  window.visualViewport?.addEventListener('resize', fitOverlay);
+  window.visualViewport?.addEventListener('scroll', fitOverlay);
+  // iOS only shows :active pressed states when the page has a touch listener.
+  document.addEventListener('touchstart', () => {}, { passive: true });
   document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && checkUpdate());
   checkUpdate();
   $('#done-toggle').onclick = () => { showDone = !showDone; render(); };
